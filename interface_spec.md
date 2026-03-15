@@ -281,6 +281,8 @@ def interpret_iki(avg_iki_ms: float) -> str:
         return "빠른 입력"
 ```
 
+임계값(2000ms, 800ms)은 파일럿 테스트에서 검증 후 보고서에 근거를 명시한다.
+
 ### 출력 프롬프트 구조
 
 ```
