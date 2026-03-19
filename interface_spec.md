@@ -2,7 +2,7 @@
 
 > **담당:** 박관용 (A)  
 > **최초 작성일:** 2026-03-15  
-> **상태:** v0.1 (초안)
+> **상태:** v0.2
 
 각 모듈이 독립적으로 개발될 수 있도록 입출력 형식을 명확히 정의한다. 모든 모듈은 이 문서의 스펙을 준수하여 출력해야 하며, 스펙 변경 시 반드시 이 문서를 먼저 수정하고 팀에 공유한다.
 
@@ -13,21 +13,28 @@
 ```
 [Frontend (E)]
       |
-      |-- 웹캠 스트림 --> [Vision Module (C)] --> vision_output JSON
-      |-- 키스트로크 이벤트 --> [Keystroke Logger (D)] --> raw keystroke JSON
-                                                               |
-                                                    [Keystroke Classifier (A)]
-                                                               |
-                                                    keystroke_output JSON
-[Frontend (E)]
-      |
-      |-- 텍스트 이벤트 --> [Text Capture (A)] --> text_output JSON
+      |-- 웹캠 스트림 ---------> [Vision Module (C)]      --> vision_output JSON
+      |-- 키스트로크 이벤트 ---> [Keystroke Logger (D)]   --> raw keystroke JSON
+      |                                                           |
+      |                                              [Keystroke Classifier (A)]
+      |                                                           |
+      |                                              keystroke_output JSON
+      |-- 텍스트 폴링 (0.2초) --> [Silence Monitor (E)]  --> silence_event JSON
+      |-- 텍스트 이벤트 -------> [Text Capture (A)]      --> text_output JSON
 
 vision_output + keystroke_output + text_output
       |
-[Prompt Assembler (A)]
+[Trigger Evaluator (A)] --- silence_event
       |
-assembled prompt --> [Claude API] --> 상담 응답
+  트리거 조건 판단
+  ├── 전송 버튼 눌림  --> 일반 프롬프트
+  └── 침묵 8초 초과  --> 침묵 프롬프트
+      |
+[Prompt Assembler (A)] --> modules/pipeline/prompt_assembler.py
+      |
+[LLM Client (A)]       --> modules/pipeline/llm_client.py
+      |
+[Claude API]           --> 상담 응답 텍스트
 ```
 
 ---
@@ -36,7 +43,7 @@ assembled prompt --> [Claude API] --> 상담 응답
 
 ### 책임 범위
 
-OpenCV로 캡처한 웹캠 프레임에서 MediaPipe로 얼굴을 감지·크롭하고, ResNet으로 감정을 분류하여 아래 형식의 JSON을 출력한다. 출력 주기는 추후 협의하여 결정한다 (예: 매 턴 종료 시점에 가장 최근 프레임 기준 1회).
+OpenCV로 캡처한 웹캠 프레임에서 MediaPipe로 얼굴을 감지·크롭하고, ResNet으로 감정을 분류하여 아래 형식의 JSON을 출력한다. 출력 주기는 0.2초(5fps)로 한다.
 
 ### 출력 스펙
 
@@ -236,17 +243,132 @@ EmoSurv 레이블 기준: `angry`, `happy`, `calm`, `sad`, `neutral`
 
 ---
 
+## Module 4 — Silence Monitor (이고은, E)
+
+### 책임 범위
+
+프론트엔드에서 0.2초마다 텍스트 입력창 상태를 폴링하여 마지막 입력 시점을 추적한다. 입력 없이 8초가 경과하면 침묵 이벤트를 생성하여 박관용(A)의 파이프라인으로 전달한다.
+
+**폴링 방식을 선택한 이유:** 침묵은 키 이벤트가 발생하지 않는 상태이므로 이벤트 기반으로는 감지할 수 없다. 일정 주기로 입력창 상태를 확인하는 폴링 방식이 유일한 선택지다.
+
+**침묵 임계값 근거:** 일상 대화에서 3초를 넘는 침묵은 심리적으로 유의미한 것으로 간주되며 (Heldner & Edlund, 2010), 실제 심리치료 세션에서 치료사가 개입하는 시점은 평균 10초 전후로 관찰된다 (Soma et al., 2022). 이를 절충하여 8초를 기본 임계값으로 설정하며, 파일럿 테스트에서 검증 후 확정한다.
+
+### 프론트엔드 구현 가이드 (이고은)
+
+```javascript
+// React 커스텀 훅 예시
+const POLL_INTERVAL_MS = 200   // 0.2초마다 입력창 상태 체크
+const SILENCE_THRESHOLD_SEC = 8  // 8초 이상 입력 없으면 침묵으로 판단
+
+useEffect(() => {
+  let lastInputAt = Date.now()
+  let silenceFired = false
+
+  const interval = setInterval(() => {
+    const currentText = inputRef.current?.value ?? ""
+    const now = Date.now()
+
+    if (currentText !== prevText) {
+      // 입력 변화 있음 — 타이머 리셋
+      lastInputAt = now
+      silenceFired = false
+      prevText = currentText
+    } else {
+      // 입력 변화 없음 — 침묵 시간 누적
+      const silenceSec = (now - lastInputAt) / 1000
+      if (silenceSec >= SILENCE_THRESHOLD_SEC && !silenceFired) {
+        silenceFired = true  // 중복 발송 방지
+        sendSilenceEvent(silenceSec)
+      }
+    }
+  }, POLL_INTERVAL_MS)
+
+  return () => clearInterval(interval)
+}, [])
+```
+
+> **주의:** `silenceFired` 플래그로 중복 발송을 방지한다. 사용자가 다시 타이핑을 시작하면 플래그를 리셋한다.
+
+### 출력 스펙
+
+```json
+{
+  "session_id": "sess_20260315_001",
+  "turn_id": 3,
+  "type": "silence_event",
+  "silence_duration_sec": 12.4,
+  "last_keystroke_at": 1710234560.001,
+  "context": "after_llm_response",
+  "timestamp": 1710234572.401
+}
+```
+
+### 필드 정의
+
+| 필드 | 타입 | 설명 |
+|---|---|---|
+| `session_id` | string | 세션 식별자 |
+| `turn_id` | int | 현재 턴 번호 |
+| `type` | string | 항상 `"silence_event"` |
+| `silence_duration_sec` | float | 마지막 키 입력으로부터 경과한 시간 (초) |
+| `last_keystroke_at` | float | 마지막 키 입력 시점 Unix timestamp |
+| `context` | string | 침묵 발생 맥락. 아래 참고 |
+| `timestamp` | float | 침묵 이벤트 생성 시점 Unix timestamp |
+
+### context 필드 값
+
+| 값 | 설명 |
+|---|---|
+| `"after_llm_response"` | LLM이 응답한 직후 사용자가 입력하지 않는 상태 |
+| `"mid_typing"` | 사용자가 타이핑 도중 멈춘 상태 |
+
+`context` 구분이 중요한 이유: LLM 응답 직후의 침묵은 사용자가 내용을 읽거나 생각하는 중일 수 있고, 타이핑 도중의 침묵은 말하기 어려운 내용을 망설이는 신호일 수 있다. 프롬프트 조립 단계에서 다르게 처리한다.
+
+---
+
+## Trigger Evaluator — LLM 호출 조건 (박관용, A)
+
+### 책임 범위
+
+비전·키스트로크·텍스트·침묵 데이터를 버퍼에 누적하다가 아래 트리거 조건이 충족되면 Prompt Assembler를 호출한다. 트리거 조건이 발생하지 않는 한 LLM을 호출하지 않는다.
+
+### 트리거 조건
+
+| 트리거 | 조건 | 프롬프트 유형 |
+|---|---|---|
+| 전송 | 사용자가 전송 버튼을 누름 | 일반 프롬프트 |
+| 침묵 | `silence_duration_sec >= 8.0` | 침묵 프롬프트 |
+
+> **참고:** 비전 데이터의 급격한 감정 변화(예: neutral → fearful)를 추가 트리거로 활용하는 방안은 파일럿 테스트 결과에 따라 v0.3에서 검토한다.
+
+### 침묵 프롬프트 구조
+
+```
+[사용자 상태 분석]
+표정: {emotion} (신뢰도 {confidence})
+시선: {head_pose_label}
+침묵 지속: {silence_duration_sec}초
+맥락: {context}
+
+사용자가 {silence_duration_sec}초간 입력하지 않고 있습니다.
+말하기 어렵거나 정리가 필요한 상황일 수 있습니다.
+강요하지 말고, 공간을 주는 방식으로 부드럽게 말을 건네세요.
+```
+
+---
+
 ## Prompt Assembler — Input & Output (박관용, A)
 
 ### 입력
 
-위 세 모듈의 출력 JSON을 조합하여 프롬프트를 조립한다.
+위 모듈들의 출력 JSON을 조합하여 프롬프트를 조립한다.
 
 ```python
 def assemble_prompt(
     vision: dict,       # Module 1 output
     keystroke: dict,    # Module 2 classifier output
-    text: dict          # Module 3 output
+    text: dict,         # Module 3 output
+    silence: dict | None = None  # Module 4 output. 침묵 트리거 시에만 전달
 ) -> str:
     ...
 ```
@@ -283,7 +405,7 @@ def interpret_iki(avg_iki_ms: float) -> str:
 
 임계값(2000ms, 800ms)은 파일럿 테스트에서 검증 후 보고서에 근거를 명시한다.
 
-### 출력 프롬프트 구조
+### 일반 프롬프트 구조 (전송 트리거)
 
 ```
 [사용자 상태 분석]
@@ -311,6 +433,7 @@ def interpret_iki(avg_iki_ms: float) -> str:
 | `[BACKSPACE]` | 삭제 이벤트 발생 |
 | `[EMOTION:SAD]` | 감정 레이블 삽입 |
 | `[GAZE:AVERTED]` | 시선 회피 감지 |
+| `[SILENCE_8s]` | 8초 이상 침묵 감지 |
 
 ---
 
@@ -319,3 +442,4 @@ def interpret_iki(avg_iki_ms: float) -> str:
 | 버전 | 날짜 | 변경 내용 | 작성자 |
 |---|---|---|---|
 | v0.1 | 2026-03-15 | 초안 작성 | 박관용 |
+| v0.2 | 2026-03-19 | Module 4 침묵 모니터 추가, Trigger Evaluator 추가, 비전 출력 주기 명시 (0.2초), 침묵 프롬프트 구조 추가, 특수 토큰 `[SILENCE_8s]` 추가 | 박관용 |
