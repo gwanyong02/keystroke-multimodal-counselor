@@ -1,4 +1,4 @@
-# 프로젝트 요약: 키스트로크 과정 데이터 기반 멀티모달 심리 상담 LLM
+# 키스트로크 과정 데이터 기반 멀티모달 심리 상담 LLM
 
 ---
 
@@ -14,17 +14,100 @@
 
 | 팀원 | 배경 | 역할 |
 |---|---|---|
-| 박관용 (A) | LLM 연구, AI 에이전트 해커톤 경험 | 키스트로크 감정 분류기 학습, 특수 토큰 설계, 프롬프트 조립 파이프라인 |
+| 박관용 (A) | LLM 연구, AI 에이전트 해커톤 경험 | 키스트로크 감정 분류기 학습, 특수 토큰 설계, 프롬프트 조립 파이프라인, Claude API 통신 |
 | 조재현 (B) | 의료 AI 기획, 바이브 코딩 | 브라우저 키스트로크 로거 개발 (React 커스텀 훅), 상담 시나리오 설계, 사용자 평가 설계(PETS), 사용자 테스트 운영 및 분석 |
 | 심인영 (C) | 비전 AI (인턴십 포함, 다수 프로젝트) | 안면 표정 비전 파이프라인 개발 (ResNet 계열), 감정 레이블+확률값 JSON 출력 |
 | 이재철 (D) | ResNet, 백엔드, 보안 | TimescaleDB 기반 세션 데이터 저장·관리 백엔드, 조재현의 로거에서 전달되는 키스트로크 데이터 수신·저장 인터페이스 설계 |
-| 이고은 (E) | 피그마, 프론트엔드 | 상담 채팅 UI 개발, 피그마 와이어프레임 설계, 이재철의 키스트로크 로거를 프론트엔드에 통합, 웹캠 스트림을 심인영의 비전 모듈로 전달 |
+| 이고은 (E) | 피그마, 프론트엔드 | 상담 채팅 UI 개발, 피그마 와이어프레임 설계, 키스트로크 로거를 프론트엔드에 통합, 웹캠 스트림을 심인영의 비전 모듈로 전달 |
 
 **병렬 개발 전략:** A가 C, D, E의 출력 형식(JSON 인터페이스)을 먼저 정의하면, 세 모듈이 충돌 없이 독립적으로 개발 가능하다.
 
 ---
 
-## 3. 시스템 아키텍처: Late Fusion
+## 3. 저장소 구조
+
+```
+keystroke-multimodal-counselor/
+├── modules/
+│   ├── classifier/          # 키스트로크 감정 분류기 (박관용)
+│   │   ├── preprocessing.py
+│   │   ├── classifier.py
+│   │   └── data/
+│   │       └── emosurv/     # EmoSurv CSV 4개 (.gitignore 적용)
+│   ├── pipeline/            # 프롬프트 조립 및 LLM 통신 (박관용)
+│   │   ├── prompt_assembler.py
+│   │   └── llm_client.py
+│   ├── keystroke/           # 키스트로크 로거 및 백엔드 (조재현, 이재철)
+│   ├── vision/              # 비전 파이프라인 (심인영)
+│   ├── frontend/            # 채팅 UI (이고은)
+│   └── evaluation/          # 사용자 평가 (조재현)
+├── .gitignore
+└── README.md
+```
+
+> **주의:** EmoSurv CSV 파일은 IEEE DataPort 라이선스상 재배포가 금지되어 있으므로 `.gitignore`에 등록하여 레포에 포함하지 않는다. 팀원 각자가 아래 데이터 세팅 절차에 따라 로컬에서 직접 다운로드한다.
+
+---
+
+## 4. 개발 환경 세팅
+
+### 저장소 클론
+
+```bash
+cd ~/projects
+git clone https://github.com/gwanyong02/keystroke-multimodal-counselor.git
+cd keystroke-multimodal-counselor
+```
+
+### EmoSurv 데이터셋 다운로드
+
+1. [IEEE DataPort EmoSurv 페이지](https://ieee-dataport.org/open-access/emosurv-typing-biometric-keystroke-dynamics-dataset-emotion-labels-created-using)에서 IEEE 계정(무료)으로 로그인
+2. 아래 4개 파일을 다운로드
+
+   | 파일명 | 크기 |
+   |---|---|
+   | Fixed Text Typing Dataset.csv | 2.77 MB |
+   | Free Text Typing Dataset.csv | 2.55 MB |
+   | Frequency Dataset.csv | 8.23 KB |
+   | Participants Information.csv | 12.61 KB |
+
+3. `modules/classifier/data/emosurv/` 폴더에 위치시킨다
+
+```bash
+mkdir -p modules/classifier/data/emosurv
+# 다운로드한 CSV 4개를 위 경로에 복사
+```
+
+### 분류기 실행
+
+```bash
+cd modules/classifier
+pip install xgboost scikit-learn pandas numpy matplotlib
+python classifier.py ./data/emosurv
+# 옵션: --model svm (SVM으로 비교 실험)
+```
+
+### 프롬프트 조립 모듈 테스트 (mock 데이터)
+
+```bash
+cd modules/pipeline
+python prompt_assembler.py          # mock JSON으로 프롬프트 생성 확인
+python prompt_assembler.py --claude # Claude API 실제 호출 (ANTHROPIC_API_KEY 필요)
+```
+
+### .gitignore
+
+```
+modules/classifier/data/
+*.pkl
+eval_summary.json
+prompt_payload_sample.json
+.env
+```
+
+---
+
+## 5. 시스템 아키텍처: Late Fusion
 
 세 모달리티를 하나의 통합 모델로 end-to-end 학습시키는 Early/Intermediate Fusion 대신, **Late Fusion** 방식을 채택한다.
 
@@ -32,6 +115,30 @@
 - 이질적인 데이터(텍스트·키스트로크·영상) 간 정렬(alignment) 문제와 역전파(backpropagation) 설계가 필요한 통합 아키텍처는 석박사 수준의 난이도
 - Late Fusion은 각 모달리티를 독립 모듈로 분리하고 출력 결과만 마지막 단계에서 합치므로 대학생 팀이 병렬 개발 가능
 - "각 모달리티의 해석 가능성을 유지하기 위해 Late Fusion을 선택했다"고 설계 결정을 명시하면 설명가능한 AI(XAI) 방향성과도 일치하여 보고서의 강점으로 활용 가능
+
+### 데이터 흐름
+
+```
+[Frontend (E)]
+      |
+      |-- 웹캠 스트림 ---------> [Vision Module (C)]      --> vision_output JSON
+      |-- 키스트로크 이벤트 ---> [Keystroke Logger (B/D)] --> raw keystroke JSON
+                                                                    |
+                                                         [Keystroke Classifier (A)]
+                                                                    |
+                                                         keystroke_output JSON
+      |-- 텍스트 이벤트 -------> [Text Capture (A)]      --> text_output JSON
+
+vision_output + keystroke_output + text_output
+      |
+[Prompt Assembler (A)] --> modules/pipeline/prompt_assembler.py
+      |
+assembled prompt
+      |
+[LLM Client (A)]       --> modules/pipeline/llm_client.py
+      |
+[Claude API]           --> 상담 응답 텍스트
+```
 
 ### 모달리티별 모듈 구성
 
@@ -77,9 +184,13 @@
 **모듈 3 — 텍스트 (박관용 담당)**
 - 삭제된 텍스트(Counterfactual Text)와 최종 전송 텍스트를 모두 캡처하여 그대로 전달
 
-**프롬프트 조립 (박관용 담당)**
+**프롬프트 조립 및 LLM 통신 (박관용 담당)**
 
 세 모듈의 JSON 출력을 그대로 LLM에 전달하지 않고, **semantic mapping** 과정을 거쳐 심리적 의미 레이블로 변환한 뒤 구조화된 프롬프트로 조립한다. raw 수치를 그대로 주면 LLM의 해석이 일관되지 않을 수 있기 때문이다.
+
+역할 분리:
+- `prompt_assembler.py`: 세 모달리티 출력 → 프롬프트 문자열 생성 전담
+- `llm_client.py`: Claude API 호출, 응답 수신, 오류 재시도 전담. 추후 모델 교체(Claude → 로컬 모델 등) 시 이 파일만 수정하면 된다.
 
 예를 들어 head pose의 경우 아래와 같은 규칙 기반 변환을 적용한다.
 
@@ -114,15 +225,15 @@ def interpret_head_pose(yaw, pitch):
 
 ---
 
-## 4. 데이터셋
+## 6. 데이터셋
 
 ### 키스트로크 감정 분류기 학습용: EmoSurv
-- 출처: IEEE DataPort (https://ieee-dataport.org/open-access/emosurv-typing-biometric-keystroke-dynamics-dataset-emotion-labels-created-using)
+- 출처: [IEEE DataPort](https://ieee-dataport.org/open-access/emosurv-typing-biometric-keystroke-dynamics-dataset-emotion-labels-created-using)
 - 구성: 124명 참가자, 감정 레이블(분노·행복·평온·슬픔·중립) 포함
 - 수집 방식: 참가자가 특정 감정 유도 영상 시청 후 자유 텍스트 및 고정 텍스트 타이핑
 - 제공 피처: key down, key up, D1U1, D1D2, U1D2 등 키 입력 타이밍 시계열 데이터
 - 접근 방법: IEEE 계정(무료)으로 로그인 후 오픈 액세스 다운로드 가능
-- **수집 환경:** 웹 애플리케이션 기반으로 수집됨. 논문 원문에서 "Unlike desktop applications used in the literature, web applications offer significant advantages"라며 의도적으로 웹 환경을 선택했음을 명시. 본 프로젝트의 React 브라우저 기반 수집 방식과 훈련-추론 환경이 일치하며, 이를 EmoSurv 선택 근거로 보고서에 명시할 수 있음
+- **수집 환경:** 웹 애플리케이션 기반으로 수집됨. 논문 원문에서 의도적으로 웹 환경을 선택했음을 명시. 본 프로젝트의 React 브라우저 기반 수집 방식과 훈련-추론 환경이 일치하며, 이를 EmoSurv 선택 근거로 보고서에 명시할 수 있음
 - **한계 (보고서에 명시 필요):** 감정 유도 방식이 영상 시청이므로 실제 상담 맥락과 다소 거리가 있음
 
 ### 상담용 LLM 파인튜닝용
@@ -131,7 +242,7 @@ def interpret_head_pose(yaw, pitch):
 
 ---
 
-## 5. LLM 전략: 프롬프트 엔지니어링 중심
+## 7. LLM 전략: 프롬프트 엔지니어링 중심
 
 **핵심 전략 — API 기반 프롬프트 엔지니어링**
 - Claude API를 호출하여 전체 파이프라인을 구성한다. 공감 응답 품질 벤치마크에서 Claude가 GPT-4o 대비 우위를 보인 점을 근거로 선택했다.
@@ -142,7 +253,7 @@ def interpret_head_pose(yaw, pitch):
 
 ---
 
-## 6. 하드웨어
+## 8. 하드웨어
 
 - **GPU:** RTX 5070 Ti (VRAM 16GB, Blackwell 아키텍처)
 - **작업별 가능 여부:**
@@ -153,7 +264,7 @@ def interpret_head_pose(yaw, pitch):
 
 ---
 
-## 7. 성능 평가 방법론
+## 9. 성능 평가 방법론
 
 ### 평가 목적
 
@@ -189,7 +300,7 @@ Within-Subject Design을 채택한다. 동일한 참가자가 조건 A와 조건
 
 ---
 
-## 8. 윤리적 고려사항 (보고서에 반드시 포함)
+## 10. 윤리적 고려사항 (보고서에 반드시 포함)
 
 - **투명한 동의(Informed Consent):** 키 입력 시간, 삭제 내용 등 수집 데이터와 활용 방식을 명확히 고지 후 명시적 동의 획득
 - **강력한 익명화(Anonymization):** 삭제된 텍스트에 포함될 수 있는 개인정보 탐지 및 마스킹
@@ -198,7 +309,7 @@ Within-Subject Design을 채택한다. 동일한 참가자가 조건 A와 조건
 
 ---
 
-## 9. 선행연구 근거 요약
+## 11. 선행연구 근거 요약
 
 - **키스트로크 동역학(Keystroke Dynamics):** 타이핑 속도, 키 입력 간 지연, 백스페이스 사용 빈도 등이 스트레스·불안·우울·인지 부하와 유의미한 상관관계를 보임이 학술적으로 증명됨 (디지털 표현형, Digital Phenotyping 분야)
 - **TypeFormer:** 키보드 입력 이벤트와 시간 간격을 시퀀스 데이터로 간주하여 트랜스포머 아키텍처로 처리하는 선행 연구
@@ -207,8 +318,16 @@ Within-Subject Design을 채택한다. 동일한 참가자가 조건 A와 조건
 
 ---
 
-## 10. 한계 (보고서에 명시 필요)
+## 12. 한계 (보고서에 명시 필요)
 
 1. EmoSurv의 감정 유도 방식(영상 시청)이 실제 상담 맥락과 다소 거리가 있음
 2. 124명 규모의 EmoSurv 데이터셋이 모델 학습에 충분한지 검증 필요
 3. 텍스트·키스트로크·영상 이질적 데이터의 통합 아키텍처를 Late Fusion으로 단순화했으므로 end-to-end 학습 대비 최적 성능에 제한이 있을 수 있음
+
+---
+
+## References
+
+- [EmoSurv Dataset (IEEE DataPort)](https://ieee-dataport.org/open-access/emosurv-typing-biometric-keystroke-dynamics-dataset-emotion-labels-created-using)
+- [Keystroke Feature Calculation (PDF)](https://ieee-dataport.s3.amazonaws.com/docs/12722/Keystroke%20feature%20calculation.pdf)
+- Maalej, A. and Kallel, I., "Does Keystroke Dynamics tell us about Emotions? A Systematic Literature Review and Dataset Construction," 2020 16th International Conference on Intelligent Environments (IE), Madrid, Spain, 2020, pp. 60-67, doi: 10.1109/IE49459.2020.9155004
