@@ -105,7 +105,7 @@ OpenCV로 캡처한 웹캠 프레임에서 MediaPipe로 얼굴을 감지·크롭
 
 ---
 
-## Module 2 — Keystroke Logger Raw Output (이재철, D)
+## Module 2 — Keystroke Logger Raw Output (조재현, B)
 
 ### 책임 범위
 
@@ -443,3 +443,4 @@ def interpret_iki(avg_iki_ms: float) -> str:
 |---|---|---|---|
 | v0.1 | 2026-03-15 | 초안 작성 | 박관용 |
 | v0.2 | 2026-03-19 | Module 4 침묵 모니터 추가, Trigger Evaluator 추가, 비전 출력 주기 명시 (0.2초), 침묵 프롬프트 구조 추가, 특수 토큰 `[SILENCE_8s]` 추가 | 박관용 |
+| v0.2.1 | 2026-03-19 | Module 2 담당자 오기 수정: 이재철(D) → 조재현(B) | 박관용 |
