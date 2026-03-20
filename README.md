@@ -118,7 +118,7 @@ prompt_payload_sample.json
 세 모달리티를 하나의 통합 모델로 end-to-end 학습시키는 Early/Intermediate Fusion 대신, **Late Fusion** 방식을 채택한다.
 
 **Late Fusion을 선택한 이유:**
-- 이질적인 데이터(텍스트·키스트로크·영상) 간 정렬(alignment) 문제와 역전파(backpropagation) 설계가 필요한 통합 아키텍처는 석박사 수준의 난이도
+- 이질적인 데이터(텍스트·키스트로크·영상) 간 정렬(alignment) 문제와 역전파(backpropagation) 설계가 필요한 통합 아키텍처는 구현이 어려움
 - Late Fusion은 각 모달리티를 독립 모듈로 분리하고 출력 결과만 마지막 단계에서 합치므로 대학생 팀이 병렬 개발 가능
 - 각 모달리티의 해석 가능성을 유지할 수 있어 설명가능한 AI(XAI) 방향성과 일치하며 보고서의 강점으로 활용 가능
 
