@@ -49,7 +49,6 @@ def build_xgboost(n_classes: int) -> XGBClassifier:
         learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.8,
-        use_label_encoder=False,
         eval_metric="mlogloss",
         objective="multi:softprob",
         num_class=n_classes,
@@ -198,7 +197,12 @@ def main(data_dir: str, model_type: str = "xgboost") -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EmoSurv 키스트로크 감정 분류기")
-    parser.add_argument("data_dir", help="EmoSurv CSV 파일 디렉토리 경로")
+    parser.add_argument(
+        "data_dir",
+        nargs="?",
+        default="./data/emosurv",
+        help="EmoSurv CSV 파일 디렉토리 경로 (기본값: ./data/emosurv)"
+    )
     parser.add_argument(
         "--model", choices=["xgboost", "svm"], default="xgboost",
         help="분류기 종류 (기본값: xgboost)"

@@ -2,15 +2,15 @@
 EmoSurv 데이터셋 전처리 모듈
 
 EmoSurv 파일 구성:
-  File1 (Fixed Text) : UserID, EmotionIndex, Index, KeyCode, KeyDown, KeyUp,
-                       D1U1, D1U2, D1D2, U1D2, U1U2, D1U3, D1D3, Answer
-  File2 (Free Text)  : 동일 컬럼 구조
-  File3 (Frequency)  : UserID, textIndex, EmotionIndex, DelFreq, LeftFreq, TotTime
-  File4 (Participants): 인구통계 (본 모듈에서는 미사용)
+  fixed_text.csv   : UserID, EmotionIndex, Index, KeyCode, KeyDown, KeyUp,
+                     D1U1, D1U2, D1D2, U1D2, U1U2, D1U3, D1D3, Answer
+  free_text.csv    : 동일 컬럼 구조
+  frequency.csv    : UserID, textIndex, EmotionIndex, DelFreq, LeftFreq, TotTime
+  participants.csv : 인구통계 (본 모듈에서는 미사용)
 
 전처리 전략:
-  keystroke 행 단위 데이터(File1/2)를 (UserID, EmotionIndex, TextType) 기준으로
-  집계하여 세션 수준 피처 벡터를 생성한 뒤 File3의 빈도 특성과 병합한다.
+  keystroke 행 단위 데이터(fixed/free)를 (UserID, EmotionIndex, TextType) 기준으로
+  집계하여 세션 수준 피처 벡터를 생성한 뒤 frequency의 빈도 특성과 병합한다.
 """
 
 import os
@@ -27,9 +27,16 @@ EMOTION_MAP = {
     "N": "neutral",
 }
 
-TIMING_FEATURES = ["D1U1", "D1D2", "U1D2", "U1U2"]
+TIMING_FEATURES = ["d1u1", "d1d2", "u1d2", "u1u2"]
 
 AGG_FUNCS = ["mean", "std", "median", "min", "max"]
+
+
+FILE_NAMES = {
+    "fixed": "fixed_text.csv",
+    "free":  "free_text.csv",
+    "freq":  "frequency.csv",
+}
 
 
 def load_raw_files(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -39,35 +46,21 @@ def load_raw_files(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFr
     Parameters
     ----------
     data_dir : str
-        EmoSurv 파일들이 위치한 디렉토리 경로.
-        파일명은 IEEE DataPort에서 다운로드한 원본 그대로를 가정한다.
-        관용적인 파일명 패턴: *Fixed*, *Free*, *Frequency* 를 탐색하거나
-        아래 명시적 이름으로 찾는다.
+        fixed_text.csv, free_text.csv, frequency.csv 가 위치한 디렉토리 경로.
 
     Returns
     -------
     df_fixed, df_free, df_freq : (DataFrame, DataFrame, DataFrame)
     """
-    candidates = {
-        "fixed": ["Fixed_Text.csv", "FixedText.csv", "file1.csv", "File1.csv"],
-        "free":  ["Free_Text.csv",  "FreeText.csv",  "file2.csv", "File2.csv"],
-        "freq":  ["Frequency.csv",  "frequency.csv", "file3.csv", "File3.csv"],
-    }
-
     loaded = {}
-    for key, names in candidates.items():
-        for name in names:
-            path = os.path.join(data_dir, name)
-            if os.path.exists(path):
-                loaded[key] = pd.read_csv(path)
-                print(f"[load] {key}: {path}  ({len(loaded[key])} rows)")
-                break
-        else:
+    for key, name in FILE_NAMES.items():
+        path = os.path.join(data_dir, name)
+        if not os.path.exists(path):
             raise FileNotFoundError(
-                f"'{key}' 파일을 찾을 수 없습니다. "
-                f"data_dir='{data_dir}' 내 파일명을 확인하세요.\n"
-                f"예상 후보: {candidates[key]}"
+                f"'{name}' 파일을 찾을 수 없습니다. (data_dir='{data_dir}')"
             )
+        loaded[key] = pd.read_csv(path, sep=";")
+        print(f"[load] {key}: {path}  ({len(loaded[key])} rows)")
 
     return loaded["fixed"], loaded["free"], loaded["freq"]
 

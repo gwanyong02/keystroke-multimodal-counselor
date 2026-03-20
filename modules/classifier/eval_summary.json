@@ -1,0 +1,16 @@
+{
+  "model": "xgboost",
+  "n_samples": 388,
+  "n_features": 23,
+  "accuracy_mean": 0.652081252081252,
+  "accuracy_std": 0.0265647037044696,
+  "macro_f1_mean": 0.5650023653046271,
+  "macro_f1_std": 0.05365183167010407,
+  "classes": [
+    "angry",
+    "calm",
+    "happy",
+    "neutral",
+    "sad"
+  ]
+}

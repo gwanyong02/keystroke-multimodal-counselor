@@ -1,2 +1,4 @@
 modules/classifier/data/
 *.pdf
+__pycache__/
+*.pyc
