@@ -274,7 +274,7 @@ def call_claude_api(system_prompt: str, user_prompt: str) -> str:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     message = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-sonnet-4-5",  # 추후 변경 가능
         max_tokens=1024,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
