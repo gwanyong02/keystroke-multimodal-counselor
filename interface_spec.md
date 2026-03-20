@@ -2,7 +2,7 @@
 
 > **담당:** 박관용 (A)  
 > **최초 작성일:** 2026-03-15  
-> **상태:** v0.2
+> **상태:** v0.2.2
 
 각 모듈이 독립적으로 개발될 수 있도록 입출력 형식을 명확히 정의한다. 모든 모듈은 이 문서의 스펙을 준수하여 출력해야 하며, 스펙 변경 시 반드시 이 문서를 먼저 수정하고 팀에 공유한다.
 
@@ -65,7 +65,10 @@ OpenCV로 캡처한 웹캠 프레임에서 MediaPipe로 얼굴을 감지·크롭
     "yaw": -12.3,
     "pitch": 5.1,
     "roll": 2.0
-  }
+  },
+  "peak_emotion": "fearful",
+  "peak_confidence": 0.74,
+  "peak_detected_at": 1710234564.001
 }
 ```
 
@@ -81,6 +84,9 @@ OpenCV로 캡처한 웹캠 프레임에서 MediaPipe로 얼굴을 감지·크롭
 | `head_pose.yaw` | float | 좌우 회전 (도). 양수: 오른쪽, 음수: 왼쪽 |
 | `head_pose.pitch` | float | 상하 회전 (도). 양수: 위, 음수: 아래 |
 | `head_pose.roll` | float | 기울기 (도) |
+| `peak_emotion` | string | 해당 턴에서 confidence 최고값을 기록한 감정 레이블 |
+| `peak_confidence` | float | 해당 감정의 최고 confidence값 |
+| `peak_detected_at` | float | peak 감정이 포착된 시점 Unix timestamp |
 
 ### 감정 레이블 목록
 
@@ -409,7 +415,8 @@ def interpret_iki(avg_iki_ms: float) -> str:
 
 ```
 [사용자 상태 분석]
-표정: {emotion} (신뢰도 {confidence})
+표정(전송 시점): {emotion} (신뢰도 {confidence})
+표정(턴 중 최고점): {peak_emotion} (신뢰도 {peak_confidence}, 전송 {elapsed}초 전)
 시선: {head_pose_label}
 타이핑 패턴: {keystroke_emotion} (신뢰도 {keystroke_confidence}), {iki_label}
 삭제된 텍스트: "{deleted_text}"
@@ -444,3 +451,4 @@ def interpret_iki(avg_iki_ms: float) -> str:
 | v0.1 | 2026-03-15 | 초안 작성 | 박관용 |
 | v0.2 | 2026-03-19 | Module 4 침묵 모니터 추가, Trigger Evaluator 추가, 비전 출력 주기 명시 (0.2초), 침묵 프롬프트 구조 추가, 특수 토큰 `[SILENCE_8s]` 추가 | 박관용 |
 | v0.2.1 | 2026-03-19 | Module 2 담당자 오기 수정: 이재철(D) → 조재현(B) | 박관용 |
+| v0.2.2 | 2026-03-20 | Vision Output에 peak_emotion, peak_confidence, peak_detected_at 필드 추가. Prompt Assembler 일반 프롬프트 구조에 peak emotion 라인 추가 | 박관용 |

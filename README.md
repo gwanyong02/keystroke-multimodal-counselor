@@ -161,6 +161,8 @@ vision_output + keystroke_output + text_output
 - **MediaPipe:** 얼굴 영역 감지 및 랜드마크 추출, 크롭된 얼굴 이미지와 head pose 전달. YOLO는 객체 탐지 특화 모델로 표정 분류에 부적합하여 제외
 - **ResNet:** 크롭된 얼굴 이미지로 감정 분류, 클래스별 확률 분포 출력
 
+비전 모듈은 턴 전체의 vision_output 버퍼에서 두 가지 값을 추출하여 프롬프트에 포함한다. 전송 시점의 최신 감정(current emotion)과 턴 중 confidence 최고값을 기록한 감정(peak emotion)을 함께 전달한다. 표정은 잠깐 드러났다가 억제될 수 있으므로 최신값만 사용하면 일시적으로 노출된 감정 신호를 놓칠 수 있다. LLM은 두 값을 비교하여 "현재는 감정을 숨기고 있으나 턴 중 두려움이 포착됨" 같은 맥락을 스스로 해석한다.
+
 **모듈 2 — 키스트로크 (조재현 수집 / 박관용 분류)**
 - 조재현: 브라우저에서 key down, key up, 타임스탬프, 삭제 여부를 실시간 수집하는 React 커스텀 훅(useKeystrokeLogger) 개발, 메시지 전송 시 버퍼 일괄 전송
 - 이재철: 전달된 데이터를 TimescaleDB에 수신·저장
