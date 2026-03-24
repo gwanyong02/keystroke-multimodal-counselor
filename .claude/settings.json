@@ -1,8 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python classifier.py)",
-      "Read(//c/Users/drago/.claude/**)"
+      "Bash(python:*)",
+      "Read(//c/Users/drago/.claude/**)",
+      "Bash(python -c \":*)"
     ],
     "additionalDirectories": [
       "C:\\Users\\drago\\.claude"

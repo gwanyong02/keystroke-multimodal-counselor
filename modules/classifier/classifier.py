@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score, RandomizedSearchCV
+from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
@@ -35,15 +36,80 @@ N_SPLITS = 5
 RANDOM_STATE = 42
 
 
-def build_xgboost(n_classes: int) -> XGBClassifier:
+PARAM_DIST = {
+    "n_estimators":     [100, 200, 300, 400],
+    "max_depth":        [3, 4, 5, 6],
+    "learning_rate":    [0.01, 0.03, 0.05, 0.1],
+    "subsample":        [0.6, 0.7, 0.8, 1.0],
+    "colsample_bytree": [0.6, 0.7, 0.8, 1.0],
+    "min_child_weight": [1, 3, 5, 7],
+    "reg_alpha":        [0, 0.1, 0.5, 1.0],
+    "reg_lambda":       [1.0, 1.5, 2.0, 3.0],
+}
+
+
+def tune_hyperparameters(
+    X: pd.DataFrame, y: np.ndarray, n_classes: int, n_iter: int = 50
+) -> dict:
+    """
+    RandomizedSearchCV로 XGBoost 하이퍼파라미터를 탐색한다.
+
+    Macro F1을 최적화 기준으로 사용한다.
+    sample_weight는 fit_params로 전달하여 불균형 보정을 유지한다.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        피처 행렬.
+    y : np.ndarray
+        감정 레이블.
+    n_classes : int
+        감정 클래스 수.
+    n_iter : int
+        탐색할 파라미터 조합 수 (기본값: 50).
+
+    Returns
+    -------
+    best_params : dict
+        최적 하이퍼파라미터 딕셔너리.
+    """
+    base_model = XGBClassifier(
+        eval_metric="mlogloss",
+        objective="multi:softprob",
+        num_class=n_classes,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+    )
+    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+    sample_weight = compute_sample_weight("balanced", y)
+
+    search = RandomizedSearchCV(
+        estimator=base_model,
+        param_distributions=PARAM_DIST,
+        n_iter=n_iter,
+        scoring="f1_macro",
+        cv=skf,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+        verbose=1,
+    )
+    search.fit(X.values if isinstance(X, pd.DataFrame) else X, y,
+               sample_weight=sample_weight)
+
+    print(f"[tune] 최적 Macro-F1 (CV): {search.best_score_:.4f}")
+    print(f"[tune] 최적 파라미터: {search.best_params_}")
+    return search.best_params_
+
+
+def build_xgboost(n_classes: int, **kwargs) -> XGBClassifier:
     """
     XGBoost 분류기를 반환한다.
 
-    n_estimators=300, max_depth=6은 124명 규모 데이터셋 기준으로
-    과적합 없이 수렴 가능한 보수적 설정이다.
+    kwargs로 하이퍼파라미터를 오버라이드할 수 있다.
+    기본값은 tune_hyperparameters 미사용 시의 보수적 설정이다.
     eval_metric은 다중 분류에 적합한 mlogloss를 사용한다.
     """
-    return XGBClassifier(
+    params = dict(
         n_estimators=300,
         max_depth=6,
         learning_rate=0.05,
@@ -55,6 +121,8 @@ def build_xgboost(n_classes: int) -> XGBClassifier:
         random_state=RANDOM_STATE,
         n_jobs=-1,
     )
+    params.update(kwargs)
+    return XGBClassifier(**params)
 
 
 def build_svm() -> Pipeline:
@@ -87,7 +155,8 @@ def cross_validate(model, X: pd.DataFrame, y: np.ndarray) -> dict:
         X_train, X_val = X_arr[train_idx], X_arr[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
 
-        model.fit(X_train, y_train)
+        sample_weight = compute_sample_weight("balanced", y_train)
+        model.fit(X_train, y_train, sample_weight=sample_weight)
         y_pred = model.predict(X_val)
 
         acc = accuracy_score(y_val, y_pred)
@@ -142,15 +211,23 @@ def train_final_model(model, X: pd.DataFrame, y: np.ndarray):
     교차 검증 완료 후 전체 데이터로 최종 모델을 학습한다.
     이 모델이 실제 추론 파이프라인에서 사용된다.
     """
-    model.fit(X.values if isinstance(X, pd.DataFrame) else X, y)
+    X_arr = X.values if isinstance(X, pd.DataFrame) else X
+    sample_weight = compute_sample_weight("balanced", y)
+    model.fit(X_arr, y, sample_weight=sample_weight)
     print("[train] 전체 데이터 기반 최종 모델 학습 완료")
     return model
 
 
-def save_model(model, path: str = "keystroke_classifier.pkl") -> None:
+def save_model(model, le, path: str = "keystroke_classifier.pkl") -> None:
+    """
+    모델과 LabelEncoder를 함께 저장한다.
+
+    추론 시 정수 인덱스를 감정 레이블로 복원하려면 LabelEncoder가 필요하다.
+    """
     import pickle
+    payload = {"model": model, "label_encoder": le}
     with open(path, "wb") as f:
-        pickle.dump(model, f)
+        pickle.dump(payload, f)
     print(f"[save] 모델 저장: {path}")
 
 
@@ -162,7 +239,11 @@ def main(data_dir: str, model_type: str = "xgboost") -> None:
     class_names = list(le.classes_)
 
     print(f"\n[main] 모델: {model_type}  클래스 수: {n_classes}")
-    model = build_xgboost(n_classes) if model_type == "xgboost" else build_svm()
+    if model_type == "xgboost":
+        best_params = tune_hyperparameters(X, y, n_classes)
+        model = build_xgboost(n_classes, **best_params)
+    else:
+        model = build_svm()
 
     print(f"\n[main] {N_SPLITS}-fold 교차 검증 시작")
     t0 = time.time()
@@ -174,11 +255,12 @@ def main(data_dir: str, model_type: str = "xgboost") -> None:
 
     plot_confusion_matrix(results, class_names)
 
-    final_model = (
-        build_xgboost(n_classes) if model_type == "xgboost" else build_svm()
-    )
+    if model_type == "xgboost":
+        final_model = build_xgboost(n_classes, **best_params)
+    else:
+        final_model = build_svm()
     final_model = train_final_model(final_model, X, y)
-    save_model(final_model)
+    save_model(final_model, le)
 
     summary = {
         "model": model_type,
