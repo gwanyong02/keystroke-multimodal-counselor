@@ -1,8 +1,8 @@
 # Interface Specification
 
-> **담당:** 박관용 (A)  
-> **최초 작성일:** 2026-03-15  
-> **상태:** v0.2.2
+> **담당:** 박관용 (A)
+> **최초 작성일:** 2026-03-15
+> **상태:** v0.3.0
 
 각 모듈이 독립적으로 개발될 수 있도록 입출력 형식을 명확히 정의한다. 모든 모듈은 이 문서의 스펙을 준수하여 출력해야 하며, 스펙 변경 시 반드시 이 문서를 먼저 수정하고 팀에 공유한다.
 
@@ -370,9 +370,34 @@ useEffect(() => {
 | 트리거 | 조건 | 프롬프트 유형 |
 |---|---|---|
 | 전송 | 사용자가 전송 버튼을 누름 | 일반 프롬프트 |
-| 침묵 | `silence_duration_sec >= 8.0` | 침묵 프롬프트 |
+| 침묵 | 복합 조건 충족 시 (아래 참고) | 침묵 프롬프트 |
 
-> **참고:** 비전 데이터의 급격한 감정 변화(예: neutral → fearful)를 추가 트리거로 활용하는 방안은 파일럿 테스트 결과에 따라 v0.3에서 검토한다.
+### 침묵 트리거 — 복합 조건 (Composite Trigger)
+
+8초 단일 시간 조건만으로는 "읽는 중"과 "망설이는 중"을 구분할 수 없어 임상적으로 불충분하다. 시간 조건에 감정 상태 조건을 AND로 결합하는 복합 트리거를 적용한다.
+
+**개입 조건 (모두 충족 시 침묵 프롬프트 호출):**
+
+1. `silence_duration_sec >= 8.0`
+2. 다음 중 하나 이상 해당:
+   - 비전 모듈의 `peak_emotion`이 부정 감정(`sad`, `fearful`, `angry`)이고 `peak_confidence >= θ_vision`
+   - 키스트로크 분류기의 `emotion`이 부정 감정(`anxious`, `sad`, `angry`)이고 `confidence >= θ_keystroke`
+   - `context == "mid_typing"` (타이핑 중 멈춘 경우 — 망설임 신호로 가중)
+
+**개입 보류 조건 (해당 시 호출 안 함):**
+
+- `context == "after_llm_response"` AND 비전·키스트로크 감정 신호 모두 임계값 미만
+- 즉, LLM이 방금 응답했고 사용자 감정도 안정적이라면 → 읽고 생각하는 중으로 간주
+
+**임계값(θ) 처리:**
+
+`θ_vision`, `θ_keystroke`는 현재 미확정이다. 파일럿 테스트(N=5 팀원)에서 수집된 비전·키스트로크 감정 신뢰도 분포를 기반으로 확정한다. 코드에서는 `THETA_VISION`, `THETA_KEYSTROKE` 상수로 관리하며, 파일럿 결과에 따라 교체한다.
+
+```python
+# modules/pipeline/prompt_assembler.py
+THETA_VISION     = 0.60  # 파일럿 테스트 후 확정 — 현재 임시값
+THETA_KEYSTROKE  = 0.55  # 파일럿 테스트 후 확정 — 현재 임시값
+```
 
 ### 침묵 프롬프트 구조
 
@@ -480,3 +505,4 @@ def interpret_iki(avg_iki_ms: float) -> str:
 | v0.2.1 | 2026-03-19 | Module 2 담당자 오기 수정: 이재철(D) → 조재현(B) | 박관용 |
 | v0.2.2 | 2026-03-20 | Vision Output에 peak_emotion, peak_confidence, peak_detected_at 필드 추가. Prompt Assembler 일반 프롬프트 구조에 peak emotion 라인 추가 | 박관용 |
 | v0.2.3 | 2026-03-24 | 세션 메타데이터 섹션 추가: session_id를 날짜 기반 형식에서 UUID v4로 교체, 참가자-세션 매핑 테이블 분리 보관 원칙 명시. 전 모듈 JSON 예시의 session_id 값 업데이트 | 박관용 |
+| v0.3.0 | 2026-03-24 | Trigger Evaluator 침묵 트리거를 단일 시간 조건(8초)에서 복합 조건(Composite Trigger)으로 고도화. 개입 조건(시간 + 감정 신호 AND), 개입 보류 조건(after_llm_response + 중립 감정), θ 임계값 상수 및 파일럿 확정 방침 명시 | 박관용 |

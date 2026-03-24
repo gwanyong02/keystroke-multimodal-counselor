@@ -29,6 +29,9 @@ class VisionOutput:
     confidence: Optional[float]
     emotion_scores: Optional[dict]
     head_pose: Optional[dict]
+    peak_emotion: Optional[str] = None
+    peak_confidence: Optional[float] = None
+    peak_detected_at: Optional[float] = None
 
 
 @dataclass
@@ -47,6 +50,15 @@ class TextInput:
     deleted_texts: list[str] = field(default_factory=list)
 
 
+@dataclass
+class SilenceEvent:
+    """침묵 모니터(이고은) 출력 스펙"""
+    silence_duration_sec: float
+    context: str              # "after_llm_response" | "mid_typing"
+    last_keystroke_at: Optional[float] = None
+    timestamp: Optional[float] = None
+
+
 # ---------------------------------------------------------------------------
 # 2. Mock 데이터
 # ---------------------------------------------------------------------------
@@ -61,6 +73,9 @@ MOCK_VISION = VisionOutput(
         "neutral": 0.08, "surprised": 0.03, "fearful": 0.02,
     },
     head_pose={"yaw": -12.3, "pitch": 5.1, "roll": 2.0},
+    peak_emotion="fearful",
+    peak_confidence=0.74,
+    peak_detected_at=1710234564.001,
 )
 
 MOCK_KEYSTROKE = KeystrokeOutput(
@@ -73,6 +88,13 @@ MOCK_KEYSTROKE = KeystrokeOutput(
 MOCK_TEXT = TextInput(
     final_text="그냥 힘들어요",
     deleted_texts=["죽고 싶어요", "요즘 너무"],
+)
+
+MOCK_SILENCE = SilenceEvent(
+    silence_duration_sec=12.4,
+    context="mid_typing",
+    last_keystroke_at=1710234560.001,
+    timestamp=1710234572.401,
 )
 
 
@@ -126,6 +148,15 @@ def mask_pii(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 CONFIDENCE_THRESHOLD = 0.45
+
+# 복합 침묵 트리거에서 부정 감정으로 간주하는 레이블 집합
+NEGATIVE_EMOTIONS_VISION     = {"sad", "fearful", "angry"}
+NEGATIVE_EMOTIONS_KEYSTROKE  = {"anxious", "sad", "angry"}
+
+# 침묵 복합 트리거 감정 신뢰도 임계값
+# 현재 값은 임시값이며, 파일럿 테스트(N=5)에서 수집된 신뢰도 분포를 기반으로 확정한다
+THETA_VISION    = 0.60
+THETA_KEYSTROKE = 0.55
 
 EMOTION_KR = {
     "happy":    "행복",
@@ -217,7 +248,60 @@ def build_special_tokens(
 
 
 # ---------------------------------------------------------------------------
-# 6. 프롬프트 조립
+# 6. Trigger Evaluator — 침묵 복합 조건
+# ---------------------------------------------------------------------------
+
+def evaluate_silence_trigger(
+    silence_event: SilenceEvent,
+    vision: VisionOutput,
+    keystroke: KeystrokeOutput,
+) -> bool:
+    """
+    침묵 이벤트 수신 시 LLM 호출 여부를 결정한다.
+
+    8초 단일 시간 조건에서 출발하여, 감정 신호 조건을 AND로 결합한
+    복합 트리거(Composite Trigger)를 적용한다.
+
+    개입 조건 (모두 충족 시 True):
+      1. silence_duration_sec >= 8.0
+      2. 다음 중 하나 이상:
+         a. 비전 peak_emotion이 부정 감정 AND peak_confidence >= THETA_VISION
+         b. 키스트로크 emotion이 부정 감정 AND confidence >= THETA_KEYSTROKE
+         c. context == "mid_typing"  (타이핑 중 멈춤 — 망설임 신호)
+
+    개입 보류 조건 (해당 시 False):
+      - context == "after_llm_response" AND 감정 신호 모두 임계값 미만
+        → LLM이 방금 응답했고 감정도 안정적이면 읽고 생각하는 중으로 간주
+
+    임계값(THETA_VISION, THETA_KEYSTROKE)은 파일럿 테스트(N=5) 후 확정한다.
+    현재 값은 임시값이다.
+    """
+    # 1. 시간 조건 (필수)
+    if silence_event.silence_duration_sec < 8.0:
+        return False
+
+    # 2. 감정 신호 평가
+    vision_negative = (
+        vision.face_detected
+        and vision.peak_emotion in NEGATIVE_EMOTIONS_VISION
+        and (vision.peak_confidence or 0.0) >= THETA_VISION
+    )
+    keystroke_negative = (
+        keystroke.emotion in NEGATIVE_EMOTIONS_KEYSTROKE
+        and keystroke.confidence >= THETA_KEYSTROKE
+    )
+    mid_typing = silence_event.context == "mid_typing"
+
+    # 3. 개입 보류: LLM 응답 직후 + 감정 신호 없음 → 읽는 중으로 간주
+    if silence_event.context == "after_llm_response" and not (vision_negative or keystroke_negative):
+        return False
+
+    # 4. 개입 조건: 감정 신호 하나 이상 충족
+    return vision_negative or keystroke_negative or mid_typing
+
+
+# ---------------------------------------------------------------------------
+# 7. 프롬프트 조립
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """당신은 심리 상담 보조 AI입니다.
@@ -307,7 +391,7 @@ def assemble_prompt(
 
 
 # ---------------------------------------------------------------------------
-# 7. Claude API 호출 (선택적)
+# 8. Claude API 호출 (선택적)
 # ---------------------------------------------------------------------------
 
 def call_claude_api(system_prompt: str, user_prompt: str) -> str:
@@ -333,7 +417,7 @@ def call_claude_api(system_prompt: str, user_prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 8. 진입점
+# 9. 진입점
 # ---------------------------------------------------------------------------
 
 def main(call_api: bool = False) -> None:
