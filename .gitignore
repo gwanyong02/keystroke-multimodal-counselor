@@ -3,3 +3,4 @@ modules/classifier/data/
 __pycache__/
 *.pyc
 .claude/
+.CLAUDE.md
