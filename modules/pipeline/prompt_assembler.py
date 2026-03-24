@@ -10,6 +10,7 @@
 """
 
 import json
+import re
 import argparse
 from dataclasses import dataclass, field
 from typing import Optional
@@ -76,7 +77,52 @@ MOCK_TEXT = TextInput(
 
 
 # ---------------------------------------------------------------------------
-# 3. Semantic Mapping: raw 수치 → 심리적 의미 레이블
+# 3. PII 마스킹
+# ---------------------------------------------------------------------------
+
+# 한국 전화번호: 010-XXXX-XXXX, 02-XXX-XXXX 등 일반적인 형식
+_RE_PHONE = re.compile(
+    r"(?<!\d)"
+    r"(0(?:10|1[1-9]|2|[3-9][0-9]?))"   # 지역번호 / 휴대폰 번호 앞자리
+    r"[-\s.]?"
+    r"(\d{3,4})"
+    r"[-\s.]?"
+    r"(\d{4})"
+    r"(?!\d)"
+)
+
+# 주민등록번호: XXXXXX-XXXXXXX 또는 붙여쓴 13자리
+_RE_RRN = re.compile(
+    r"(?<!\d)"
+    r"\d{6}"
+    r"[-\s]?"
+    r"[1-4]\d{6}"
+    r"(?!\d)"
+)
+
+# 이메일 주소
+_RE_EMAIL = re.compile(
+    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
+)
+
+
+def mask_pii(text: str) -> str:
+    """
+    text에서 개인식별정보(PII)를 마스킹하여 반환한다.
+
+    마스킹 대상:
+      - 한국 전화번호  → [전화번호]
+      - 주민등록번호   → [주민등록번호]
+      - 이메일 주소    → [이메일]
+    """
+    text = _RE_RRN.sub("[주민등록번호]", text)
+    text = _RE_PHONE.sub("[전화번호]", text)
+    text = _RE_EMAIL.sub("[이메일]", text)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# 4. Semantic Mapping: raw 수치 → 심리적 의미 레이블
 # ---------------------------------------------------------------------------
 
 CONFIDENCE_THRESHOLD = 0.45
@@ -136,7 +182,7 @@ def format_emotion_label(emotion: str, confidence: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 4. 특수 토큰 생성
+# 5. 특수 토큰 생성
 # ---------------------------------------------------------------------------
 
 def build_special_tokens(
@@ -171,7 +217,7 @@ def build_special_tokens(
 
 
 # ---------------------------------------------------------------------------
-# 5. 프롬프트 조립
+# 6. 프롬프트 조립
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """당신은 심리 상담 보조 AI입니다.
@@ -198,6 +244,10 @@ def assemble_prompt(
     system_prompt : str
     user_prompt   : str
     """
+    # PII 마스킹 — LLM 전달 전 처리
+    masked_final = mask_pii(text.final_text)
+    masked_deleted = [mask_pii(t) for t in text.deleted_texts]
+
     lines = ["[사용자 상태 분석]"]
 
     # --- 표정 ---
@@ -220,14 +270,14 @@ def assemble_prompt(
     lines.append(f"타이핑 패턴: {ks_emotion}, {timing_desc}")
 
     # --- 삭제된 텍스트 ---
-    if text.deleted_texts:
-        for deleted in text.deleted_texts:
+    if masked_deleted:
+        for deleted in masked_deleted:
             lines.append(f'삭제된 텍스트: "{deleted}"')
     else:
         lines.append("삭제된 텍스트: 없음")
 
     # --- 최종 입력 ---
-    lines.append(f'최종 입력: "{text.final_text}"')
+    lines.append(f'최종 입력: "{masked_final}"')
 
     # --- 특수 토큰 ---
     tokens = build_special_tokens(keystroke, vision, text)
@@ -257,7 +307,7 @@ def assemble_prompt(
 
 
 # ---------------------------------------------------------------------------
-# 6. Claude API 호출 (선택적)
+# 7. Claude API 호출 (선택적)
 # ---------------------------------------------------------------------------
 
 def call_claude_api(system_prompt: str, user_prompt: str) -> str:
@@ -283,7 +333,7 @@ def call_claude_api(system_prompt: str, user_prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 7. 진입점
+# 8. 진입점
 # ---------------------------------------------------------------------------
 
 def main(call_api: bool = False) -> None:
