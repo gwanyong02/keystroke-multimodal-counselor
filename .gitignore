@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .claude/
 .CLAUDE.md
+.omc/
+prompt_payload_sample.json
+pipeline_test_output.json

@@ -15,6 +15,11 @@ import argparse
 from dataclasses import dataclass, field
 from typing import Optional
 
+try:
+    from modules.pipeline.llm_client import call_claude_api
+except ImportError:
+    from llm_client import call_claude_api
+
 
 # ---------------------------------------------------------------------------
 # 1. 데이터 구조 정의
@@ -465,33 +470,7 @@ def _assemble_silence_prompt(
 
 
 # ---------------------------------------------------------------------------
-# 8. Claude API 호출 (선택적 — llm_client.py 분리 예정)
-# ---------------------------------------------------------------------------
-
-def call_claude_api(system_prompt: str, user_prompt: str) -> str:
-    """
-    Claude API를 호출하여 상담 응답을 받는다.
-    실제 운영 시 API 키는 환경변수(ANTHROPIC_API_KEY)로 관리한다.
-    """
-    try:
-        import anthropic
-    except ImportError:
-        raise ImportError("pip install anthropic 후 재실행하세요.")
-
-    import os
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-    message = client.messages.create(
-        model="claude-sonnet-4-5",  # 추후 llm_client.py로 분리 시 변경 가능
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    return message.content[0].text
-
-
-# ---------------------------------------------------------------------------
-# 9. 진입점
+# 8. 진입점
 # ---------------------------------------------------------------------------
 
 def main(call_api: bool = False) -> None:
