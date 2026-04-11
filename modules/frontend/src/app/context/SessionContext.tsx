@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, ReactNode, useRef } from 'react';
+import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 
 interface DeletedSegment {
   text: string;
@@ -13,6 +13,9 @@ interface KeystrokeEvent {
 }
 
 interface SessionContextType {
+  sessionId: string;
+  turnId: number;
+  incrementTurn: () => void;
   silenceTime: number;
   setSilenceTime: (time: number) => void;
   deletedSegments: DeletedSegment[];
@@ -22,15 +25,33 @@ interface SessionContextType {
   clearKeystrokeEvents: () => void;
   typingRhythm: number[];
   updateTypingRhythm: (rhythm: number[]) => void;
+  lastLLMResponseTime: number | null;
+  setLastLLMResponseTime: (time: number | null) => void;
 }
 
 const SessionContext = createContext<SessionContextType | undefined>(undefined);
 
+// Generate UUID v4
+function generateUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export function SessionProvider({ children }: { children: ReactNode }) {
+  const [sessionId] = useState<string>(() => generateUUID());
+  const [turnId, setTurnId] = useState(1);
   const [silenceTime, setSilenceTime] = useState(0);
   const [deletedSegments, setDeletedSegments] = useState<DeletedSegment[]>([]);
   const [keystrokeEvents, setKeystrokeEvents] = useState<KeystrokeEvent[]>([]);
   const [typingRhythm, setTypingRhythm] = useState<number[]>([3, 5, 4, 6, 3, 7, 4]);
+  const [lastLLMResponseTime, setLastLLMResponseTime] = useState<number | null>(null);
+
+  const incrementTurn = () => {
+    setTurnId((prev) => prev + 1);
+  };
 
   const addDeletedSegment = (segment: DeletedSegment) => {
     setDeletedSegments((prev) => [...prev.slice(-3), segment]);
@@ -67,6 +88,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   return (
     <SessionContext.Provider
       value={{
+        sessionId,
+        turnId,
+        incrementTurn,
         silenceTime,
         setSilenceTime,
         deletedSegments,
@@ -76,6 +100,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         clearKeystrokeEvents,
         typingRhythm,
         updateTypingRhythm,
+        lastLLMResponseTime,
+        setLastLLMResponseTime,
       }}
     >
       {children}

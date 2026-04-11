@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { Send } from 'lucide-react';
+import { Send, Video, VideoOff } from 'lucide-react';
 import { useSession } from '../context/SessionContext';
+import { useKeystrokeLogger } from '../hooks/useKeystrokeLogger';
+import { useTextCapture } from '../hooks/useTextCapture';
+import { useSilenceMonitor } from '../hooks/useSilenceMonitor';
+import { useWebcam } from '../hooks/useWebcam';
 
 interface Message {
   id: string;
@@ -11,195 +15,172 @@ interface Message {
 
 export function ChatInterface() {
   const {
-    sessionId, //가명처리 ID
+    sessionId,
     turnId,
-    setSilenceTime,
-    addDeletedSegment,
-    addKeystrokeEvent,
+    incrementTurn,
     clearKeystrokeEvents,
-    sendSilenceEvent 
+    setLastLLMResponseTime,
   } = useSession();
 
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
       sender: 'KAI',
-      text: '안녕하세요. 무엇을 도와드릴까요?',
+      text: '안녕하세요! 저는 KAI입니다. 오늘 기분이 어떠신가요?',
       timestamp: new Date(),
     },
   ]);
   const [inputValue, setInputValue] = useState('');
-  const [lastInputTime, setLastInputTime] = useState(Date.now());
-  const prevTextRef = useRef('');
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // 화면 하단 자동 스크롤
+  // 커스텀 훅들 통합
+  const { getKeystrokeOutput } = useKeystrokeLogger(inputRef);
+  const { getTextOutput } = useTextCapture(inputRef);
+  const { stream: webcamStream, error: webcamError } = useWebcam();
+
+  // 침묵 모니터 (침묵 감지 시 자동으로 LLM 호출)
+  useSilenceMonitor({
+    inputRef,
+    onSilenceDetected: (silenceEvent) => {
+      console.log('[Chat] Silence event detected:', silenceEvent);
+
+      // TODO: 박관용(A)의 파이프라인에 silence_event 전송
+      // 여기서는 일단 UI에 메시지 표시
+      const silenceMessage: Message = {
+        id: Date.now().toString(),
+        sender: 'KAI',
+        text: `말하기 어려운 부분이 있으신가요? 천천히 편하게 말씀해 주세요. (${silenceEvent.silence_duration_sec.toFixed(1)}초간 침묵 감지)`,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, silenceMessage]);
+      setLastLLMResponseTime(Date.now());
+    },
+  });
+
+  // 자동 스크롤
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Silence Monitor: 0.2초 간격 폴링 및 8초 임계값 적용
-  useEffect(() => {
-    const tick = 200; 
-    const limit = 8;
-    let hasSent = false;
-
-    const monitor = setInterval(() => {
-      const now = Date.now();
-      
-      if (inputValue !== prevTextRef.current) {
-        // 텍스트 변화가 있으면 타이머 리셋
-        setLastInputTime(now);
-        hasSent = false;
-        prevTextRef.current = inputValue;
-        setSilenceTime(0);
-      } else {
-        // 변화 없으면 침묵 시간 계산
-        const duration = (now - lastInputTime) / 1000;
-        setSilenceTime(duration);
-
-        // 8초 초과 시 이벤트 발송 (중복 방지)
-        if (duration >= limit && !hasSent) {
-          hasSent = true;
-          triggerSilence(duration);
-        }
-      }
-    }, tick);
-
-    return () => clearInterval(monitor);
-  }, [inputValue, lastInputTime]);
-
-  const triggerSilence = (duration: number) => {
-    const silenceContext = inputValue.trim().length > 0 ? "mid_typing" : "after_llm_response";
-    const eventData = {
-      session_id: sessionId,
-      turn_id: turnId,
-      type: "silence_event",
-      silence_duration_sec: parseFloat(duration.toFixed(3)),
-      last_keystroke_at: lastInputTime / 1000,
-      context: silenceContext,
-      timestamp: Date.now() / 1000
-    };
-
-    // 실시간 데이터 전파
-    if (sendSilenceEvent) sendSilenceEvent(eventData);
-
-    // 채팅창 알림 메시지 추가
-    const silenceMsg: Message = {
-      id: `silence-${Date.now()}`,
-      sender: 'KAI',
-      text: "말씀하기 어려운 부분이 있으신가요? 천천히 말씀해 주셔도 괜찮습니다.",
-      timestamp: new Date(),
-    };
-    setMessages(prev => [...prev, silenceMsg]);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    addKeystrokeEvent({
-      type: 'keydown',
-      key: e.key,
-      timestamp: Date.now() / 1000,
-      is_delete: e.key === 'Backspace' || e.key === 'Delete',
-    });
-
-    // 삭제된 텍스트 추적 (단어 단위 추출)
-    if (e.key === 'Backspace' && inputValue.trim().length > 0) {
-      const segments = inputValue.trim().split(' ');
-      const target = segments[segments.length - 1];
-      
-      if (target.length >= 2) {
-        addDeletedSegment({
-          text: target,
-          deleted_at: Date.now() / 1000,
-        });
-      }
-    }
-
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      onSend();
+      handleSend();
     }
   };
 
-  const handleKeyUp = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    addKeystrokeEvent({
-      type: 'keyup',
-      key: e.key,
-      timestamp: Date.now() / 1000,
-      is_delete: e.key === 'Backspace' || e.key === 'Delete',
-    });
-  };
+  const handleSend = () => {
+    if (inputValue.trim()) {
+      // 모든 멀티모달 데이터 수집
+      const keystrokeOutput = getKeystrokeOutput();
+      const textOutput = getTextOutput(inputValue);
 
-  const onSend = () => {
-    if (!inputValue.trim()) return;
+      // 콘솔에 출력 (디버깅용)
+      console.log('[Chat] Sending message with multimodal data:');
+      console.log('- Session ID:', sessionId);
+      console.log('- Turn ID:', turnId);
+      console.log('- Keystroke Output:', keystrokeOutput);
+      console.log('- Text Output:', textOutput);
 
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      sender: 'User',
-      text: inputValue,
-      timestamp: new Date(),
-    };
+      // TODO: 박관용(A)의 파이프라인에 데이터 전송
+      // 예: await sendToBackend({ keystroke: keystrokeOutput, text: textOutput })
 
-    setMessages(prev => [...prev, userMsg]);
-    setInputValue('');
-    clearKeystrokeEvents();
-    setSilenceTime(0);
-    setLastInputTime(Date.now());
-
-    // 상담사 응답 (Mock)
-    setTimeout(() => {
-      const aiReply: Message = {
-        id: `kai-${Date.now()}`,
-        sender: 'KAI',
-        text: '그렇군요. 조금 더 자세히 들려주실 수 있을까요?',
+      // UI 업데이트
+      const newMessage: Message = {
+        id: Date.now().toString(),
+        sender: 'User',
+        text: inputValue,
         timestamp: new Date(),
       };
-      setMessages(prev => [...prev, aiReply]);
-    }, 1500);
+      setMessages([...messages, newMessage]);
+      setInputValue('');
+      clearKeystrokeEvents();
+      incrementTurn();
+
+      // Mock AI response
+      setTimeout(() => {
+        const aiResponse: Message = {
+          id: (Date.now() + 1).toString(),
+          sender: 'KAI',
+          text: '말씀하신 내용을 잘 들었습니다. 지금 힘든 감정을 느끼고 계시는 것 같네요. 더 자세히 말씀해 주시겠어요?',
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, aiResponse]);
+        setLastLLMResponseTime(Date.now());
+      }, 1500);
+    }
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#1A1A1A]">
+    <div className="flex flex-col h-full">
+      {/* Webcam Status Indicator */}
+      <div className="bg-[#252525] border-b border-gray-700 px-4 py-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs">
+            {webcamStream ? (
+              <>
+                <Video size={14} className="text-green-400" />
+                <span className="text-green-400">웹캠 활성화</span>
+              </>
+            ) : webcamError ? (
+              <>
+                <VideoOff size={14} className="text-red-400" />
+                <span className="text-red-400">웹캠 오류: {webcamError}</span>
+              </>
+            ) : (
+              <>
+                <VideoOff size={14} className="text-yellow-400" />
+                <span className="text-yellow-400">웹캠 초기화 중...</span>
+              </>
+            )}
+          </div>
+          <div className="text-xs text-gray-500">
+            Session: {sessionId.slice(0, 8)}... | Turn: {turnId}
+          </div>
+        </div>
+      </div>
+
+      {/* Messages */}
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
-        {messages.map((m) => (
+        {messages.map((message) => (
           <div
-            key={m.id}
-            className={`flex ${m.sender === 'User' ? 'justify-end' : 'justify-start'}`}
+            key={message.id}
+            className={`flex ${message.sender === 'User' ? 'justify-end' : 'justify-start'}`}
           >
             <div
-              className={`max-w-[75%] rounded-2xl px-4 py-2.5 ${
-                m.sender === 'User'
+              className={`max-w-[70%] rounded-2xl px-4 py-3 ${
+                message.sender === 'User'
                   ? 'bg-blue-600 text-white'
-                  : 'bg-[#2A2A2A] text-gray-200 border border-gray-700'
+                  : 'bg-[#2A2A2A] text-gray-100'
               }`}
             >
-              <div className="text-[10px] uppercase opacity-40 mb-0.5">
-                {m.sender}
-              </div>
-              <div className="text-[14px] leading-snug">{m.text}</div>
+              <div className="text-xs opacity-70 mb-1">{message.sender}</div>
+              <div className="text-sm leading-relaxed">{message.text}</div>
             </div>
           </div>
         ))}
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="p-4 bg-[#1A1A1A] border-t border-gray-800">
-        <div className="flex gap-2 max-w-5xl mx-auto">
-          <input
-            type="text"
+      {/* Input Area */}
+      <div className="border-t border-gray-700 p-4">
+        <div className="flex gap-2">
+          <textarea
+            ref={inputRef}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            onKeyUp={handleKeyUp}
-            placeholder="메시지를 입력하세요..."
-            className="flex-1 bg-[#252525] text-white rounded-xl px-4 py-3 focus:outline-none focus:ring-1 focus:ring-blue-500 border border-gray-700 transition-all placeholder-gray-600"
+            placeholder="메시지를 입력하세요... (Enter: 전송, Shift+Enter: 줄바꿈)"
+            rows={3}
+            className="flex-1 bg-[#2A2A2A] text-white rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-500 resize-none"
           />
           <button
-            onClick={onSend}
-            className="bg-blue-600 hover:bg-blue-700 text-white rounded-xl px-5 py-3 transition-opacity flex items-center gap-2"
+            onClick={handleSend}
+            className="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-6 py-3 transition-colors flex items-center gap-2 self-end"
           >
-            <Send size={16} />
-            <span className="text-sm font-medium">전송</span>
+            <Send size={18} />
+            전송
           </button>
         </div>
       </div>
