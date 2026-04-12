@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createSession, createTurn } from '../utils/api';
 
 interface DeletedSegment {
   text: string;
@@ -13,9 +14,9 @@ interface KeystrokeEvent {
 }
 
 interface SessionContextType {
-  sessionId: string;
+  sessionId: string | null;
   turnId: number;
-  incrementTurn: () => void;
+  incrementTurn: () => Promise<void>;
   silenceTime: number;
   setSilenceTime: (time: number) => void;
   deletedSegments: DeletedSegment[];
@@ -27,30 +28,61 @@ interface SessionContextType {
   updateTypingRhythm: (rhythm: number[]) => void;
   lastLLMResponseTime: number | null;
   setLastLLMResponseTime: (time: number | null) => void;
+  isSessionReady: boolean;
 }
 
 const SessionContext = createContext<SessionContextType | undefined>(undefined);
 
-// Generate UUID v4
-function generateUUID(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
 export function SessionProvider({ children }: { children: ReactNode }) {
-  const [sessionId] = useState<string>(() => generateUUID());
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [turnId, setTurnId] = useState(1);
   const [silenceTime, setSilenceTime] = useState(0);
   const [deletedSegments, setDeletedSegments] = useState<DeletedSegment[]>([]);
   const [keystrokeEvents, setKeystrokeEvents] = useState<KeystrokeEvent[]>([]);
   const [typingRhythm, setTypingRhythm] = useState<number[]>([3, 5, 4, 6, 3, 7, 4]);
   const [lastLLMResponseTime, setLastLLMResponseTime] = useState<number | null>(null);
+  const [isSessionReady, setIsSessionReady] = useState(false);
 
-  const incrementTurn = () => {
-    setTurnId((prev) => prev + 1);
+  // Initialize session with backend on mount
+  useEffect(() => {
+    async function initSession() {
+      try {
+        const response = await createSession();
+        setSessionId(response.session_id);
+        setTurnId(response.turn_index);
+        setIsSessionReady(true);
+        console.log('[Session] Backend session created:', response);
+      } catch (error) {
+        console.error('[Session] Failed to create backend session:', error);
+        // Fallback to local UUID if backend is not available
+        const fallbackId = 'local-' + Date.now();
+        setSessionId(fallbackId);
+        setIsSessionReady(true);
+        console.warn('[Session] Using local session ID (backend unavailable)');
+      }
+    }
+
+    initSession();
+  }, []);
+
+  const incrementTurn = async () => {
+    if (!sessionId) return;
+
+    try {
+      // Only call backend if we have a real session (not fallback)
+      if (!sessionId.startsWith('local-')) {
+        const response = await createTurn(sessionId);
+        setTurnId(response.turn_index);
+        console.log('[Session] New turn created:', response);
+      } else {
+        // Fallback: just increment locally
+        setTurnId((prev) => prev + 1);
+      }
+    } catch (error) {
+      console.error('[Session] Failed to create turn:', error);
+      // Fallback to local increment
+      setTurnId((prev) => prev + 1);
+    }
   };
 
   const addDeletedSegment = (segment: DeletedSegment) => {
@@ -102,6 +134,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         updateTypingRhythm,
         lastLLMResponseTime,
         setLastLLMResponseTime,
+        isSessionReady,
       }}
     >
       {children}
