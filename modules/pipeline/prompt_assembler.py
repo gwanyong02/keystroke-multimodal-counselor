@@ -1,5 +1,5 @@
 """
-프롬프트 조립 모듈 (skeleton)
+프롬프트 조립 모듈
 
 입력: 세 모달리티의 JSON 출력 + 텍스트 데이터
 출력: LLM에 전달할 구조화된 프롬프트 문자열
@@ -10,9 +10,15 @@
 """
 
 import json
+import re
 import argparse
 from dataclasses import dataclass, field
 from typing import Optional
+
+try:
+    from modules.pipeline.llm_client import call_claude_api
+except ImportError:
+    from llm_client import call_claude_api
 
 
 # ---------------------------------------------------------------------------
@@ -21,29 +27,55 @@ from typing import Optional
 
 @dataclass
 class VisionOutput:
-    """비전 모듈(심인영) 출력 스펙"""
+    """비전 모듈(심인영) 출력 스펙 — Module 1"""
     timestamp: float
     face_detected: bool
     emotion: Optional[str]
     confidence: Optional[float]
     emotion_scores: Optional[dict]
     head_pose: Optional[dict]
+    peak_emotion: Optional[str] = None
+    peak_confidence: Optional[float] = None
+    peak_detected_at: Optional[float] = None
 
 
 @dataclass
 class KeystrokeOutput:
-    """키스트로크 분류기(박관용) 출력 스펙"""
+    """키스트로크 분류기(박관용) 출력 스펙 — Module 2 Classifier Output"""
+    session_id: str
+    turn_id: int
     emotion: str
     confidence: float
-    mean_iki: Optional[float] = None  # inter-key interval 평균 (ms)
-    pause_count: Optional[int] = None # 2초 이상 입력 중단 횟수
+    avg_iki_ms: Optional[float] = None      # 평균 IKI (밀리초). 프롬프트에서 "입력 지연 X초"로 변환
+    backspace_rate: Optional[float] = None  # 삭제 키 비율. 프롬프트에서 망설임 정도 표현에 활용
+
+
+@dataclass
+class DeletedSegment:
+    """삭제된 텍스트 세그먼트"""
+    text: str
+    deleted_at: float  # Unix timestamp
 
 
 @dataclass
 class TextInput:
-    """텍스트 모듈(박관용) 출력 스펙"""
+    """텍스트 모듈(박관용) 출력 스펙 — Module 3"""
+    session_id: str
+    turn_id: int
     final_text: str
-    deleted_texts: list[str] = field(default_factory=list)
+    deleted_segments: list[DeletedSegment] = field(default_factory=list)
+
+
+@dataclass
+class SilenceEvent:
+    """침묵 모니터(이고은) 출력 스펙 — Module 4"""
+    session_id: str
+    turn_id: int
+    type: str                               # 항상 "silence_event"
+    silence_duration_sec: float
+    context: str                            # "after_llm_response" | "mid_typing"
+    last_keystroke_at: Optional[float] = None
+    timestamp: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -60,41 +92,115 @@ MOCK_VISION = VisionOutput(
         "neutral": 0.08, "surprised": 0.03, "fearful": 0.02,
     },
     head_pose={"yaw": -12.3, "pitch": 5.1, "roll": 2.0},
+    peak_emotion="fearful",
+    peak_confidence=0.74,
+    peak_detected_at=1710234564.001,
 )
 
 MOCK_KEYSTROKE = KeystrokeOutput(
+    session_id="a3f2c1d4-7e8b-4c2a-9f1d-0b5e3a7c6d2e",
+    turn_id=3,
     emotion="anxious",
     confidence=0.61,
-    mean_iki=320.5,
-    pause_count=3,
+    avg_iki_ms=2300.0,
+    backspace_rate=0.14,
 )
 
 MOCK_TEXT = TextInput(
+    session_id="a3f2c1d4-7e8b-4c2a-9f1d-0b5e3a7c6d2e",
+    turn_id=3,
     final_text="그냥 힘들어요",
-    deleted_texts=["죽고 싶어요", "요즘 너무"],
+    deleted_segments=[
+        DeletedSegment(text="죽고 싶어요", deleted_at=1710234561.200),
+        DeletedSegment(text="요즘 너무",   deleted_at=1710234563.800),
+    ],
+)
+
+MOCK_SILENCE = SilenceEvent(
+    session_id="a3f2c1d4-7e8b-4c2a-9f1d-0b5e3a7c6d2e",
+    turn_id=3,
+    type="silence_event",
+    silence_duration_sec=12.4,
+    context="mid_typing",
+    last_keystroke_at=1710234560.001,
+    timestamp=1710234572.401,
 )
 
 
 # ---------------------------------------------------------------------------
-# 3. Semantic Mapping: raw 수치 → 심리적 의미 레이블
+# 3. PII 마스킹
+# ---------------------------------------------------------------------------
+
+# 한국 전화번호: 010-XXXX-XXXX, 02-XXX-XXXX 등 일반적인 형식
+_RE_PHONE = re.compile(
+    r"(?<!\d)"
+    r"(0(?:10|1[1-9]|2|[3-9][0-9]?))"   # 지역번호 / 휴대폰 번호 앞자리
+    r"[-\s.]?"
+    r"(\d{3,4})"
+    r"[-\s.]?"
+    r"(\d{4})"
+    r"(?!\d)"
+)
+
+# 주민등록번호: XXXXXX-XXXXXXX 또는 붙여쓴 13자리
+_RE_RRN = re.compile(
+    r"(?<!\d)"
+    r"\d{6}"
+    r"[-\s]?"
+    r"[1-4]\d{6}"
+    r"(?!\d)"
+)
+
+# 이메일 주소
+_RE_EMAIL = re.compile(
+    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
+)
+
+
+def mask_pii(text: str) -> str:
+    """
+    text에서 개인식별정보(PII)를 마스킹하여 반환한다.
+
+    마스킹 대상:
+      - 한국 전화번호  → [전화번호]
+      - 주민등록번호   → [주민등록번호]
+      - 이메일 주소    → [이메일]
+    """
+    text = _RE_RRN.sub("[주민등록번호]", text)
+    text = _RE_PHONE.sub("[전화번호]", text)
+    text = _RE_EMAIL.sub("[이메일]", text)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# 4. Semantic Mapping: raw 수치 → 심리적 의미 레이블
 # ---------------------------------------------------------------------------
 
 CONFIDENCE_THRESHOLD = 0.45
 
+# 복합 침묵 트리거에서 부정 감정으로 간주하는 레이블 집합
+NEGATIVE_EMOTIONS_VISION    = {"sad", "fearful", "angry"}
+NEGATIVE_EMOTIONS_KEYSTROKE = {"anxious", "sad", "angry"}
+
+# 침묵 복합 트리거 감정 신뢰도 임계값
+# 현재 값은 임시값이며, 파일럿 테스트(N=5)에서 수집된 신뢰도 분포를 기반으로 확정한다
+THETA_VISION    = 0.60
+THETA_KEYSTROKE = 0.55
+
 EMOTION_KR = {
-    "happy":    "행복",
-    "sad":      "슬픔",
-    "angry":    "분노",
-    "calm":     "평온",
-    "neutral":  "중립",
-    "fearful":  "두려움",
-    "surprised":"놀람",
-    "anxious":  "불안",
-    "disgust":  "혐오",
+    "happy":     "행복",
+    "sad":       "슬픔",
+    "angry":     "분노",
+    "calm":      "평온",
+    "neutral":   "중립",
+    "fearful":   "두려움",
+    "surprised": "놀람",
+    "anxious":   "불안",
+    "disgust":   "혐오",
 }
 
 
-def map_head_pose(yaw: float, pitch: float) -> str:
+def interpret_head_pose(yaw: float, pitch: float) -> str:
     """
     head pose 수치를 심리적 자세 레이블로 변환한다.
 
@@ -111,19 +217,18 @@ def map_head_pose(yaw: float, pitch: float) -> str:
         return "정면 응시"
 
 
-def map_keystroke_timing(mean_iki: Optional[float], pause_count: Optional[int]) -> str:
-    """IKI와 중단 횟수를 타이핑 패턴 설명으로 변환한다."""
-    parts = []
-    if mean_iki is not None:
-        if mean_iki > 400:
-            parts.append(f"평균 입력 간격 {mean_iki:.0f}ms (느린 타이핑)")
-        elif mean_iki < 150:
-            parts.append(f"평균 입력 간격 {mean_iki:.0f}ms (빠른 타이핑)")
-        else:
-            parts.append(f"평균 입력 간격 {mean_iki:.0f}ms (보통)")
-    if pause_count is not None and pause_count > 0:
-        parts.append(f"2초 이상 중단 {pause_count}회")
-    return ", ".join(parts) if parts else "타이핑 패턴 정보 없음"
+def interpret_iki(avg_iki_ms: float) -> str:
+    """
+    평균 IKI를 심리적 의미 레이블로 변환한다.
+
+    임계값(2000ms, 800ms)은 파일럿 테스트에서 검증 후 보고서에 근거를 명시한다.
+    """
+    if avg_iki_ms > 2000:
+        return f"입력 지연 {avg_iki_ms / 1000:.1f}초 (긴 망설임)"
+    elif avg_iki_ms > 800:
+        return f"입력 지연 {avg_iki_ms / 1000:.1f}초 (보통)"
+    else:
+        return "빠른 입력"
 
 
 def format_emotion_label(emotion: str, confidence: float) -> str:
@@ -136,7 +241,7 @@ def format_emotion_label(emotion: str, confidence: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 4. 특수 토큰 생성
+# 5. 특수 토큰 생성
 # ---------------------------------------------------------------------------
 
 def build_special_tokens(
@@ -151,10 +256,7 @@ def build_special_tokens(
     """
     tokens = []
 
-    if keystroke.pause_count and keystroke.pause_count > 0:
-        tokens.append(f"[PAUSE_{keystroke.pause_count}x]")
-
-    if text.deleted_texts:
+    if text.deleted_segments:
         tokens.append("[BACKSPACE_DETECTED]")
 
     if vision.face_detected and vision.emotion:
@@ -171,7 +273,60 @@ def build_special_tokens(
 
 
 # ---------------------------------------------------------------------------
-# 5. 프롬프트 조립
+# 6. Trigger Evaluator — 침묵 복합 조건
+# ---------------------------------------------------------------------------
+
+def evaluate_silence_trigger(
+    silence_event: SilenceEvent,
+    vision: VisionOutput,
+    keystroke: KeystrokeOutput,
+) -> bool:
+    """
+    침묵 이벤트 수신 시 LLM 호출 여부를 결정한다.
+
+    8초 단일 시간 조건에서 출발하여, 감정 신호 조건을 AND로 결합한
+    복합 트리거(Composite Trigger)를 적용한다.
+
+    개입 조건 (모두 충족 시 True):
+      1. silence_duration_sec >= 8.0
+      2. 다음 중 하나 이상:
+         a. 비전 peak_emotion이 부정 감정 AND peak_confidence >= THETA_VISION
+         b. 키스트로크 emotion이 부정 감정 AND confidence >= THETA_KEYSTROKE
+         c. context == "mid_typing"  (타이핑 중 멈춤 — 망설임 신호)
+
+    개입 보류 조건 (해당 시 False):
+      - context == "after_llm_response" AND 감정 신호 모두 임계값 미만
+        → LLM이 방금 응답했고 감정도 안정적이면 읽고 생각하는 중으로 간주
+
+    임계값(THETA_VISION, THETA_KEYSTROKE)은 파일럿 테스트(N=5) 후 확정한다.
+    현재 값은 임시값이다.
+    """
+    # 1. 시간 조건 (필수)
+    if silence_event.silence_duration_sec < 8.0:
+        return False
+
+    # 2. 감정 신호 평가
+    vision_negative = (
+        vision.face_detected
+        and vision.peak_emotion in NEGATIVE_EMOTIONS_VISION
+        and (vision.peak_confidence or 0.0) >= THETA_VISION
+    )
+    keystroke_negative = (
+        keystroke.emotion in NEGATIVE_EMOTIONS_KEYSTROKE
+        and keystroke.confidence >= THETA_KEYSTROKE
+    )
+    mid_typing = silence_event.context == "mid_typing"
+
+    # 3. 개입 보류: LLM 응답 직후 + 감정 신호 없음 → 읽는 중으로 간주
+    if silence_event.context == "after_llm_response" and not (vision_negative or keystroke_negative):
+        return False
+
+    # 4. 개입 조건: 감정 신호 하나 이상 충족
+    return vision_negative or keystroke_negative or mid_typing
+
+
+# ---------------------------------------------------------------------------
+# 7. 프롬프트 조립
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """당신은 심리 상담 보조 AI입니다.
@@ -189,45 +344,73 @@ def assemble_prompt(
     vision: VisionOutput,
     keystroke: KeystrokeOutput,
     text: TextInput,
+    silence: Optional[SilenceEvent] = None,
 ) -> tuple[str, str]:
     """
     세 모달리티 출력을 하나의 구조화된 user prompt로 조립한다.
+    silence가 전달된 경우 침묵 트리거 전용 프롬프트를 생성한다.
 
     Returns
     -------
     system_prompt : str
     user_prompt   : str
     """
+    if silence is not None:
+        return SYSTEM_PROMPT, _assemble_silence_prompt(vision, silence)
+    return SYSTEM_PROMPT, _assemble_normal_prompt(vision, keystroke, text)
+
+
+def _assemble_normal_prompt(
+    vision: VisionOutput,
+    keystroke: KeystrokeOutput,
+    text: TextInput,
+) -> str:
+    """전송 트리거 — 일반 프롬프트 조립"""
+    masked_final   = mask_pii(text.final_text)
+    masked_deleted = [mask_pii(seg.text) for seg in text.deleted_segments]
+
     lines = ["[사용자 상태 분석]"]
 
-    # --- 표정 ---
+    # --- 표정 (전송 시점) ---
     if vision.face_detected and vision.emotion and vision.confidence is not None:
-        lines.append(f"표정: {format_emotion_label(vision.emotion, vision.confidence)}")
+        lines.append(f"표정(전송 시점): {format_emotion_label(vision.emotion, vision.confidence)}")
     else:
-        lines.append("표정: 데이터 없음 (카메라 미감지 또는 비활성화)")
+        lines.append("표정(전송 시점): 데이터 없음 (카메라 미감지 또는 비활성화)")
+
+    # --- 표정 (턴 중 최고점 peak_emotion) ---
+    if (
+        vision.face_detected
+        and vision.peak_emotion
+        and vision.peak_confidence is not None
+        and vision.peak_detected_at is not None
+    ):
+        elapsed = round(vision.timestamp - vision.peak_detected_at, 1)
+        peak_label = format_emotion_label(vision.peak_emotion, vision.peak_confidence)
+        lines.append(f"표정(턴 중 최고점): {peak_label}, 전송 {elapsed}초 전")
 
     # --- 시선/자세 ---
     if vision.face_detected and vision.head_pose:
-        pose_label = map_head_pose(
+        pose_label = interpret_head_pose(
             vision.head_pose.get("yaw", 0),
             vision.head_pose.get("pitch", 0),
         )
-        lines.append(f"시선·자세: {pose_label}")
+        lines.append(f"시선: {pose_label}")
 
     # --- 타이핑 패턴 ---
-    timing_desc = map_keystroke_timing(keystroke.mean_iki, keystroke.pause_count)
-    ks_emotion  = format_emotion_label(keystroke.emotion, keystroke.confidence)
-    lines.append(f"타이핑 패턴: {ks_emotion}, {timing_desc}")
+    ks_emotion = format_emotion_label(keystroke.emotion, keystroke.confidence)
+    iki_label  = interpret_iki(keystroke.avg_iki_ms) if keystroke.avg_iki_ms is not None else "입력 지연 정보 없음"
+    timing_parts = [ks_emotion, iki_label]
+    if keystroke.backspace_rate is not None:
+        timing_parts.append(f"삭제율 {keystroke.backspace_rate:.0%}")
+    lines.append(f"타이핑 패턴: {', '.join(timing_parts)}")
 
     # --- 삭제된 텍스트 ---
-    if text.deleted_texts:
-        for deleted in text.deleted_texts:
+    if masked_deleted:
+        for deleted in masked_deleted:
             lines.append(f'삭제된 텍스트: "{deleted}"')
-    else:
-        lines.append("삭제된 텍스트: 없음")
 
     # --- 최종 입력 ---
-    lines.append(f'최종 입력: "{text.final_text}"')
+    lines.append(f'최종 입력: "{masked_final}"')
 
     # --- 특수 토큰 ---
     tokens = build_special_tokens(keystroke, vision, text)
@@ -243,7 +426,7 @@ def assemble_prompt(
 
     # 자해/자살 위험 신호 감지 (삭제된 텍스트 포함)
     crisis_keywords = ["죽", "자살", "사라", "없어지", "힘들어 죽"]
-    all_texts = " ".join(text.deleted_texts + [text.final_text])
+    all_texts = " ".join([seg.text for seg in text.deleted_segments] + [text.final_text])
     if any(kw in all_texts for kw in crisis_keywords):
         lines.append("")
         lines.append(
@@ -252,38 +435,42 @@ def assemble_prompt(
             "안전 확인 절차에 따라 즉각 반응하세요."
         )
 
-    user_prompt = "\n".join(lines)
-    return SYSTEM_PROMPT, user_prompt
+    return "\n".join(lines)
+
+
+def _assemble_silence_prompt(
+    vision: VisionOutput,
+    silence: SilenceEvent,
+) -> str:
+    """침묵 트리거 — 침묵 프롬프트 조립"""
+    lines = ["[사용자 상태 분석]"]
+
+    # --- 표정 ---
+    if vision.face_detected and vision.emotion and vision.confidence is not None:
+        lines.append(f"표정: {format_emotion_label(vision.emotion, vision.confidence)}")
+    else:
+        lines.append("표정: 데이터 없음 (카메라 미감지 또는 비활성화)")
+
+    # --- 시선/자세 ---
+    if vision.face_detected and vision.head_pose:
+        pose_label = interpret_head_pose(
+            vision.head_pose.get("yaw", 0),
+            vision.head_pose.get("pitch", 0),
+        )
+        lines.append(f"시선: {pose_label}")
+
+    lines.append(f"침묵 지속: {silence.silence_duration_sec}초")
+    lines.append(f"맥락: {silence.context}")
+    lines.append("")
+    lines.append(f"사용자가 {silence.silence_duration_sec}초간 입력하지 않고 있습니다.")
+    lines.append("말하기 어렵거나 정리가 필요한 상황일 수 있습니다.")
+    lines.append("강요하지 말고, 공간을 주는 방식으로 부드럽게 말을 건네세요.")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# 6. Claude API 호출 (선택적)
-# ---------------------------------------------------------------------------
-
-def call_claude_api(system_prompt: str, user_prompt: str) -> str:
-    """
-    Claude API를 호출하여 상담 응답을 받는다.
-    실제 운영 시 API 키는 환경변수(ANTHROPIC_API_KEY)로 관리한다.
-    """
-    try:
-        import anthropic
-    except ImportError:
-        raise ImportError("pip install anthropic 후 재실행하세요.")
-
-    import os
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-    message = client.messages.create(
-        model="claude-sonnet-4-5",  # 추후 변경 가능
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    return message.content[0].text
-
-
-# ---------------------------------------------------------------------------
-# 7. 진입점
+# 8. 진입점
 # ---------------------------------------------------------------------------
 
 def main(call_api: bool = False) -> None:
@@ -291,12 +478,20 @@ def main(call_api: bool = False) -> None:
     print("Mock 데이터 기반 프롬프트 조립 테스트")
     print("=" * 60)
 
+    print("\n--- [일반 프롬프트 (전송 트리거)] ---")
     system_prompt, user_prompt = assemble_prompt(MOCK_VISION, MOCK_KEYSTROKE, MOCK_TEXT)
-
     print("\n[SYSTEM PROMPT]")
     print(system_prompt)
     print("\n[USER PROMPT]")
     print(user_prompt)
+
+    print("\n--- [침묵 프롬프트 (침묵 트리거)] ---")
+    _, silence_prompt = assemble_prompt(MOCK_VISION, MOCK_KEYSTROKE, MOCK_TEXT, silence=MOCK_SILENCE)
+    print("\n[SILENCE PROMPT]")
+    print(silence_prompt)
+
+    should_trigger = evaluate_silence_trigger(MOCK_SILENCE, MOCK_VISION, MOCK_KEYSTROKE)
+    print(f"\n[침묵 트리거 평가 결과: {'개입' if should_trigger else '보류'}]")
 
     if call_api:
         print("\n[Claude API 호출 중...]")
@@ -313,7 +508,7 @@ def main(call_api: bool = False) -> None:
         "meta": {
             "vision_emotion": MOCK_VISION.emotion,
             "keystroke_emotion": MOCK_KEYSTROKE.emotion,
-            "has_deleted_text": len(MOCK_TEXT.deleted_texts) > 0,
+            "has_deleted_text": len(MOCK_TEXT.deleted_segments) > 0,
         },
     }
     with open("prompt_payload_sample.json", "w", encoding="utf-8") as f:
